@@ -272,3 +272,205 @@ java -XX:-EliminateLocks -jar thread-learning.jar //取消锁消除
 - 生产者仅负责产生结果数据，不关心数据该如何进行处理，而消费者专心处理结果数据
 - 消息队列是容量限制的，队列满时不会再加入数据，空时不会再消耗数据
 - JDK中各种阻塞队列，采用的就是这种模式
+
+## LockSupport
+
+### park、unpack
+
+与Object的wait和notify相比
+
+- wait，notify和notifyAll必须配合Object Monitor来一起使用，而unpark不必
+- park & unpack是以线程为单位来[阻塞]和[唤醒]线程，而notify只能随机唤醒一个等待线程，notifyAll是唤醒所有等待线程，就不那么精确了
+- park & unpack可以先unpark，而wait & notify不能先notify
+
+#### 原理分析
+
+每个线程都有自己的一个Parker对象，由三部分组成_counter(干粮)，_codn(帐篷)和_mutex(互斥锁)，举个例子
+
+- 线程就像一个旅人，Parker就像他随身携带的背包，条件变量就好比背包中的帐篷。_counter就好比背包中的备用干粮（0为耗尽，1为充足）
+- 调用park就是要看需不需要停下来歇息，就是检查下背包
+  - 如果备用干粮耗尽，那么就钻进帐篷休息
+  - 如果备用干粮充足，那么就不需要停留，继续前进
+- 调用unpark，就好比令干粮充足
+  - 如果这时线程还在帐篷，就唤醒旅人让他继续前进
+  - 如果这是线程还在运行，那么下次他调用park时，仅是消耗掉备用干粮，不需要停留继续前进，因为背包空间有限，多次调用unpark仅会补充一份备用干粮
+
+## 对线程状态转换的理解
+
+- 情况1 NEW ----> RUNNABLE
+
+  当调用t.start()方法时，由NEW --> RUNNABLE
+
+- 情况2 RUNNABLE <----> WAITING
+
+  t线程使用synchronized(obj)获取了对象锁之后
+
+  - 调用obj.wait()方法时，t线程从RUNNABLE --> WAITING
+  - 调用obj.notify()、obj.notifyAll()，t.interrupt()方法时
+    - 竞争锁成功，t线程从WAITING-->RUNNABLE
+    - 竞争锁失败，t线程从WAITING-->BLOCKED
+
+- 情况3 RUNNABLE <----> WAITING
+
+  - 当前线程调用t.join()方法时，当前线程从RUNNABLE ---> WAITING
+    - 注意是当前线程在t线程对象的监视器上等待
+  - t线程运行结束时，或调用了当前线程的interrupt()方法时，当前线程从WAITING ---> RUNNABLE
+
+- 情况4 RUNNBALE <---> WAITING
+
+  - 当前线程调用LockSupport.park()方法会让当前线程从RUNNABLE ----> WAITING
+  - 调用LockSupport.unpack(目标线程)或调用了线程的interrupt()，会让目标线程从WAITING --> RUNNABLE
+
+- 情况5 RUNNABLE <---> TIMED_WAITING
+
+  t线程用synchronized(obj)获取了对象锁之后
+
+  - 调用了obj.wait(long n)方法时，t线程从RUNNABLE ----> TIMED_WAITING
+  - t线程等待时间超过了n毫秒，或调用obj.notify()，obj.notifyAll()，t.interrupt()时
+    - 竞争锁成功，t线程从TIMED_WAITING ---> RUNNABLE
+    - 竞争锁失败，t线程从TIMED_WAITING ---> BLOCKED
+
+- 情况6 RUNNABLE <---->TIMED_WAITING
+
+  - 当前线程调用t.join(long n)方法时，当前线程从RUNNABLE -----> TIMED_WAITING
+    - 注意是当前线程在t线程对象的监视器上等待
+  - 当前线程等待时间超过了n毫秒，或t线程运行结束，或调用了当前线程的interrupt()方法时，当前线程从TIMED_WAITING ----> RUNNABLE
+
+- 情况7 RUNNABLE <----> TIMED_WAITING
+
+  - 当前线程调用了Thread.sleep(long n)，当前线程从RUNNABLE ---> TIMED_WAITING
+  - 当前线程等待时间超过了n毫秒，当前线程从TIMED_WAITING ----> RUNNABLE
+
+- 情况8 RUNNABLE <----> TIMED_WAITING
+
+  - 当前线程调用LockSupport.parkNanos(long nanos)或LockSupport.parkUntil(long millis)时，当前线程从RUNNABLE ----> TIMED_WAITING
+  - 调用LockSupport.unpark(目标线程)或调用了线程的interrupt()，或是等待超时，会让目标线程从TIMED_WAITING ----> RUNNABLE
+
+- 情况9 RUNNABLE <----> BLOCKED
+
+  - t线程使用synchronized(obj)获取了对象锁时如果竞争失败，从RUNNABLE ----> BLOCKED
+  - 持有obj锁线程的同步代码块执行完毕，会唤醒该对象上所有BLOCKED的线程重新竞争，如果其中t线程竞争到对象锁的话，那么就从BLOCKED ----> RUNNABLE，其他失败的线程仍然BLOCKED
+
+- 情况10 RUNNABLE <----> TERMINATED
+
+  - 当前线程所有代码运行完毕，进入TERMINATED
+
+## 线程状态查看
+
+```java
+1.jps  2.jstack [pid]
+```
+
+## ReentrantLock
+
+相对于synchronized它具备如下特点
+
+- 可中断
+- 可以设置超时时间
+- 可以设置为公平锁
+- 支持多个条件变量
+
+与synchronized一样，都支持可重入
+
+可重入指的是同一个线程如果首次获得了这把锁，那么因为它是这把锁的拥有者，因此有权力再次获取这把锁，如果是不可重入锁，那么第二次获取锁时，自己也会被锁挡住
+
+### 基本语法
+
+```java
+//获取锁
+reentrantLock.lock();
+try{
+  //临界区
+}finally{
+  //释放锁
+  reentrantLock.unlock();
+}
+```
+
+### 条件变量
+
+synchronized中也有条件变量，就是我们讲原理时那个waitSet休息室，当条件不满足时，进入waitSet等待ReentrantLock的条件变量比synchronized强大之处于，它是支持多个条件变量的，这就好比
+
+- synchronized是那些不满足条件的线程都在一间休息室等消息
+- 而ReentrantLock支持多间休息室，有专门等烟的休息室、专门等早餐的休息室、唤醒时也是按休息室来唤醒
+
+使用流程
+
+- await前需要获得锁
+- await执行后，会释放锁，进入conditionObject等待
+- await的线程被唤醒（或打断或超时）去重新竞争lock锁
+- 竞争lock锁成功后，从await后继续执行
+
+## 多线程设计模式
+
+### 同步模式之顺序控制
+
+固定运行顺序比如，必须先2后1的打印，可以使用wait、notify，也可使park、unpack，可以看basic.TestFixedOrder
+
+### 同步模式之多线程交替顺序控制
+
+交替输出比如，线程1输出a 5次，线程2 输出b 5次，线程3输出c 5次。现在要求输出abcabcabcabcabc怎么实现，可以使用wait、notify，也可以使用park、unpack，还可以使用ReentrantLock，参考basic.TestOrderController
+
+#### 要点总结
+
+- 分析多线程访问共享资源的时候，那些代码片段属于临界区
+- 使用synchronized互斥解决临界区的线程安全问题
+  - 掌握synchronized锁对象的语法
+  - 掌握synchronized家在成员方法和静态方法语法
+  - 掌握wait & notify同步方法
+- 使用lock互斥解决临界区的安全问题
+  - 掌握lock的使用细节：可打断、锁超时、公平锁、条件变量
+- 学会分析变量的线程安全性、掌握常见线程安全类的使用
+- 了解线程活跃性问题：死锁、活锁、饥饿
+- 引用方面
+  - 互斥：使用synchronized或lock打到共享资源互斥效果
+  - 同步：使用wait & notify或lock的condition变量来达到线程通信的效果
+- 原理方面
+  - monitor、synchronized、wait & notify原理
+  - synchronized进阶原理，偏向，轻量，锁膨胀，重量级锁，批量偏向，批量撤销偏向
+  - park & unpark原理
+- 模式方面
+  - 同步模式之保护性暂停
+  - 异步模式之生产者消费
+  - 同步模式之顺序控制
+
+## JMM（Java Memory Model）
+
+### 共享模型之内存
+
+上面讲到了Monitor主要关注的是访问共享变量时，保证临界区代码的原子性，下面将进一步了解共享变量在多线程之间的[可见性]问题与多条指令执行时的[有序性]问题
+
+### Java内存模型
+
+JMM即Java Memory Model，他定义了主存、工作区内存抽象的概念，底层对应着CPU寄存器、缓存、硬件内存、CPU指令优化等。
+
+JMM体现在一下几个方面
+
+- 原子性 - 保证指令不受到线程上下文切换的影响
+- 可见性 - 保证指令不受到CPU缓存的影响
+- 有序性 - 保证指令不受到CPU指令并行优化的影响
+
+```java
+static boolean run = true;
+psvm(){
+  Thread t = new Thread(()->{
+    while(run){
+      //代码块
+    }
+  });
+  t.start();
+  TimeUnit.SECONDS.sleep(1);
+  run = false;
+}
+```
+
+上面的代码他结束不了，为什么呢？来分析分析
+
+在程序运行之初，存在着主内存(static boolean run = true)，还有主线程和t线程
+
+1. 初始状态，t线程刚开始从主内存读取了run的值到工作内存
+2. 因为t线程要频繁的从主内存中读取run的值，JIT编译器会将run的值缓存到自己的工作内存（t线程的高速缓存）中的高速缓存中，减少对主内存中run的访问，以提高效率
+3. 1秒钟之后，main线程修改了run的值，并同步导主内存中，而t线程是从自己工作内存的高速缓存中读取这个run的变量，结果永远都是旧的值！
+
+修改，将run变量编程volatile，会去主内存中获得最新的值
+

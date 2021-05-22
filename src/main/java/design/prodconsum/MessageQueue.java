@@ -18,11 +18,13 @@ public class MessageQueue {
         synchronized (messages) {
             while (messages.size() == capacity) {
                 try {
+                    System.out.println("当前队列已满，PUT操作正在等待消费....");
                     messages.wait();
                 } catch (InterruptedException e) {
                     e.printStackTrace();
                 }
             }
+            System.out.println(Thread.currentThread().getName()+"生产了："+message);
             messages.addLast(message);
             messages.notifyAll();
         }
@@ -33,12 +35,14 @@ public class MessageQueue {
         synchronized (messages) {
             while (messages.isEmpty()) {
                 try {
+                    System.out.println("当前队列已空，TAKE操作正在等待生产....");
                     messages.wait();
                 } catch (InterruptedException e) {
                     e.printStackTrace();
                 }
             }
             Message message = messages.removeFirst();
+            System.out.println(Thread.currentThread().getName()+"消费了："+message);
             messages.notifyAll();
             return message;
         }
