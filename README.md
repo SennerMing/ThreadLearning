@@ -1101,15 +1101,15 @@ sout(i.addAndGet(-5));
 
 因为我们要保护的类型并不都是Java已经实现的基本类型
 
-#### 不安全实现
-
-#### 安全实现-使用锁
-
-#### 安全实现-使用CAS
-
 #### ABA问题
 
+代码参照atomic.TestAtomicReference，线程无法感知到别的线程对变量做得修改，主线程仅能判断出共享变量的值与最初值A是否相等，不能感知到这种从A改为B又改回A的情况，如果主线程希望：
+
+只要有其他线程[动过了]共享变量，那么自己的CAS就算是失败，这时，仅比较值是不够的，需要再加一个版本号！
+
 ##### AtomicStampedReference
+
+
 
 ##### AtomicMarkableReference
 
