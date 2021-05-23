@@ -472,5 +472,659 @@ psvm(){
 2. 因为t线程要频繁的从主内存中读取run的值，JIT编译器会将run的值缓存到自己的工作内存（t线程的高速缓存）中的高速缓存中，减少对主内存中run的访问，以提高效率
 3. 1秒钟之后，main线程修改了run的值，并同步导主内存中，而t线程是从自己工作内存的高速缓存中读取这个run的变量，结果永远都是旧的值！
 
-修改，将run变量编程volatile，会去主内存中获得最新的值
+修改，将run变量编程volatile，会去主内存中获得最新的值,synchronized(obj){临界区中的代码，也是可见性的}
 
+可见性 & 原子性
+
+前面的例子体现的时机就是可见性，他可以保证是在多个线程之间，一个线程对volatile变量的修改对另一个线程可见，不能保证原子性，仅用在一个写线程，多个读线程的情况：
+
+上例中从字节码理解是这样的：
+
+```java
+getstatic run //线程t获取run true
+getstatic run //线程t获取run true
+getstatic run //线程t获取run true
+getstatic run //线程t获取run true
+putstatic run //线程main修改run为false，仅此一次
+getstatic run //线程t获取run为false
+```
+
+比较一下之前我们将线程安全时举的例子：两个线程一个i++一个i--，只能保证看到最新值，不能解决指令交错
+
+```java
+//假设i的初始值为0
+getstatic i	//线程2 - 获取静态变量i的值 线程内i=0
+
+getstatic i //线程1 - 获取静态变量i的值 线程内i=0
+iconst_1 		//线程1 - 准备常量1
+iadd				//线程1 -	自增 线程内i=1
+putstatic i	//线程1 - 将修改后的值存入静态变量i 静态变量i=1
+
+iconst_1		//线程2 - 准备常量1
+isub 				//线程2 - 自减 线程内i=-1
+putstatic		//线程2 -	将修改后的值存入静态变量i	静态变量i=-1
+```
+
+### Balking模式
+
+```java
+private static boolean hasStart = false;
+psvm(){
+  synchronized(this){
+    if(hasStart){
+      return;
+    }
+  }
+}
+```
+
+单例模式也比较常用的
+
+### 指令重排序
+
+指令重排序是为了性能优化，提高CPU使用率，现代处理器会设计为一个时钟周期完成一条执行时间最长的CPU指令。为什么这么做呢？可以想到指令还可以在划分成一个个更小的阶段，例如，每条指令都可以分为：取指令--指令译码--内存访问--数据写回 这5个阶段
+
+### 支持流水线的处理器
+
+现代CPU支持多级指令流水线，例如支持同时执行 取指令 -- 指令译码 --  执行指令 -- 内存访问 -- 数据写回 的处理器，就可以称之为 **五级指令流水线**。这时CPU可以在一个时钟周期内，同时运行五条之灵的不同阶段（相当于一条执行时间最长的复杂指令），IPC=1，本质上流水线技术并不能缩短单条指令的执行时间，但是它变相地提高了指令的吞吐率。
+
+奔腾4（Pentium4）支持高达35级流水线，但由于功耗太高被废弃。
+
+在不改变程序结果的前提下，这些指令的各个阶段可以通过 **重排序**和 **组合**来实现 **指令级并行**，这一技术在上世纪80年代中叶到90年代中叶占据了计算机架构的重要地位。
+
+**分阶段，分工是提升效率的关键！**  任务分解难度大鸭
+
+指令重排的前提是，重拍指令不能影响结果，例如：
+
+```java
+//可以重排序的例子
+int a = 10;
+int b = 20;
+sout(a+b);
+
+//不能重排序的例子
+int a = 10;
+int b = a - 5;
+```
+
+### 防止重排序
+
+上代码：
+
+```java
+public class ConcurrentTest{
+  int num = 0;
+  volatile boolean ready = false;
+  
+  public void m1(){
+    if(ready){
+      result = num + num;
+    } else{
+      result = 1; 
+    }
+  }
+  
+  public void m2(){
+    num = 2;
+    ready = true;
+  }
+}
+```
+
+上面对ready加了volatile之后，result就不会出现0的情况了，volatile修饰的字段之前的操作，都不会进行重排序，他会对代码块加上写屏障，保证他之前的代码不会在它之后执行，sout()也会出现正确的结果。
+
+### Volatile原理
+
+volatile的底层实现是内存屏障，Memory Barrier（Memory Fence）
+
+- 对volatile变量的写指令后会加入写屏障
+- 对volatile变量的读指令前会加入读屏障
+
+#### 如何保证可见性
+
+写屏障（sfence）保障在该屏障之前的，对共享变量的改动，都同步到主存当中
+
+```java
+public void m2(){
+  num = 2;
+  ready = true;//ready是volatile赋值带写屏障
+  //写屏障 方向↑
+}
+```
+
+而读屏障（lfence）保证在该屏障之后，对共享变量的读取，加载的是主内存中最新的数据
+
+```java
+public void m1(){
+  //ready是volatile读取值带读屏障，读屏障 方向↓
+  if(ready){
+    result = num + num;
+  }else{
+    result = 1
+  }
+}
+```
+
+```java
+sequence diagram;
+participant t1 as t1 线程;
+participant num as num = 0;
+participant ready as volatile ready = false;
+participant t2 as t2 线程;
+t1 -- >> t1 : num = 2;
+t1 -- >> ready : ready = true;
+Note over t1,ready : 写屏障;
+Note over num,t2 : 读屏障;
+t2 -- >> ready : 读取ready = true;
+t2 -- >> num : 读取num = 2;
+```
+
+#### 如何保证有序性
+
+写屏障会确保指令重排序时，不会将写屏障之前的代码排在写屏障之后
+
+```java
+public void m2(){
+  num = 2;
+  ready = true; //ready 是 volatile复制带写屏障
+  //写屏障 ↑
+}
+```
+
+读屏障会确保指令重排序时，不会将读屏障之后的代码排在读屏障之前
+
+```java
+public void m1(){
+  //ready 是 volatile 读取值带读屏障 读屏障↓
+  if(ready){
+    result = num + num;
+  }else{
+    result = 1;
+  }
+}
+```
+
+不能解决指令交错（多线程情况会出问题）：
+
+- 写屏障仅仅保证之后的读能够读到最新的结果，但不能保证读跑到他前面去
+- 而有序性的保证也只是保证了本线程内相关代码不被重排序
+
+#### Double-checked Locking
+
+上代码
+
+```java
+public final class Singleton{
+  private Singleton(){} 
+  private static Singleton INSTANCE = null;
+  public static Singleton getInstance(){
+    if(INSTANCE == null){
+      synchronized(Singleton.class){
+        if(INSTANCE == null){
+          INSTANCE = new Singleton();
+        }
+      }
+    }
+    return INSTANCE;
+  }
+}
+```
+
+以上实现的特点：
+
+- 懒惰实例化
+- 首次使用getInstance()才使用synchronized加锁，后续使用时无需加锁
+- 有隐含的，但很关键的一点：第一个if使用了INSTANCE变量，实在同步块之外
+
+在多线程环境下，上面代码是有问题的，getInstance方法对应的字节码为：
+
+```java
+0: getstatic #2;
+3: ifnonnull 37;
+6: ldc			 #3;		//获得类对象
+8: dup;
+9: astore_0;				//放入操作数栈
+10: monitorenter;		//检查Monitor对象
+11: getstatic #2;		//拿到INSTANCE对象
+14: ifnonnull 27;
+17: new 			#3;
+20: dup;
+21: invokespecial #4;
+24: putstatic			#2;
+27: aload_0;
+28: monitorexit;
+29: goto 					37;
+32: astore_1;
+33: aload_0;
+34: monitorexit;
+35: aload_1;
+36: athrow;
+37: getstatic 		#2;
+40: areturn
+```
+
+其中
+
+- 17表示创建对象，将对象引用入栈	//new Singleton
+- 20表示复制一份对象引用 	 //根据引用地址
+- 21表示利用一个对象引用，调用构造方法
+- 24表示利用一个对象引用，赋值给static INSTANCE
+
+也许JVM会优化为：先执行24，再执行21。如果两个线程t1、t2按如下事件序列执行：
+
+| THREAD-1                          | INSTANCE | THREAD-2                                         |
+| --------------------------------- | -------- | ------------------------------------------------ |
+| 17：new                           |          |                                                  |
+| 20：dup                           |          |                                                  |
+| 24：putstatic（给INSTANCE赋值）   |          |                                                  |
+|                                   |          | 0：getstatic（获取INSTANCE引用）                 |
+|                                   |          | 3：ifnonnull 37（判断不为空，跳转至37行）        |
+|                                   |          | 37：getstatic（获取INSTANCE引用）                |
+|                                   |          | 40：areturn（返回）                              |
+|                                   |          | **使用INSTANCE对象了**（然鹅，对象还没构造完呢） |
+| 21：invokespecial（调用构造方法） |          |                                                  |
+
+这样看来，synchronized不能阻止重排序，volatile可以。
+
+解决办法
+
+```java
+public final class Singleton{
+  private Singleton(){} 
+  private static volatile Singleton INSTANCE = null;
+  public static Singleton getInstance(){
+    if(INSTANCE == null){
+      synchronized(Singleton.class){
+        if(INSTANCE == null){
+          INSTANCE = new Singleton();
+        }
+      }
+    }
+    return INSTANCE;
+  }
+}
+```
+
+```java
+//-----------------> 加入了对INSTANCE变量的读屏障 ↓
+0: getstatic #2;
+3: ifnonnull 37;
+6: ldc			 #3;		//获得类对象
+8: dup;
+9: astore_0;				//放入操作数栈
+10: monitorenter;		//检查Monitor对象			保证原子性、可见性
+11: getstatic #2;		//拿到INSTANCE对象
+14: ifnonnull 27;
+17: new 			#3;
+20: dup;
+21: invokespecial #4;
+24: putstatic			#2;
+//------------------> 加入对INSTANCE变量的写屏障 ↑
+27: aload_0;
+28: monitorexit;		//									保证原子性、可见性
+29: goto 					37;
+32: astore_1;
+33: aload_0;
+34: monitorexit;
+35: aload_1;
+36: athrow;
+37: getstatic 		#2;
+40: areturn
+```
+
+
+
+| THREAD-1                                      | INSTANCE | THREAD-2                                       |
+| --------------------------------------------- | -------- | ---------------------------------------------- |
+| 17：new                                       |          |                                                |
+| 20：dup                                       |          |                                                |
+| 21：invokespecial（调用构造方法）             |          |                                                |
+| 24：putstatic（**给INSTANCE赋值，带写屏障**） |          |                                                |
+|                                               |          | 0：getstatic（**获取INSTANCE引用，带读屏障**） |
+|                                               |          | 3：ifnonnull 37（判断不为空，跳转至37行）      |
+|                                               |          | 37：getstatic（获取INSTANCE引用）              |
+|                                               |          | 40：areturn（返回）                            |
+|                                               |          | 使用INSTANCE对象了（就不会出现为null）         |
+
+上面带读写屏障的步骤，Thread-1：24，Thread-2：0，即使顺序颠倒，也能保证Thread-2进入到synchronized语句块中，交由重量级锁去控制。
+
+#### happens-before
+
+Happens-before规定了对共享变量的写操作对其他线程的读操作可见，他是可见性与有序性的一套规则总结，抛开以下happens-before规则，JMM并不能保证一个线程对共享变量的写，对于其他线程对该共享变量的读可见
+
+- 线程解锁m之前对变量的写，对于接下来对m加锁的其他线程对该变量的读可见
+
+  ```java
+  static int x;
+  static Object m = new Object();
+  
+  new Thread(()->{
+    synchronized(m){
+      x = 10;
+    }
+  },"t1").start();
+  
+  new Thread(()->{
+    synchronized(m){
+      sout(x);
+    }
+  },"t2").start();
+  ```
+
+  
+
+- 线程对volatile变量的写，对接下来其他线程对该变量的读可见
+
+  ```java
+  volatile static int x;
+  
+  new Thread(()->{
+    x = 10;
+  },"t1").start();
+  
+  new Thread(()->{
+    sout(x);
+  },"t2").start();
+  ```
+
+- 线程start前对变量的写，对该线程开始后对该变量的读可见
+
+  ```java
+  static int x;
+  x = 10;
+  new Thread(()->{
+    sout(x);
+  },"t2").start()
+  ```
+
+- 线程结果前对变量的写，对其他线程得知它结束后的读可见（比如其他线程调用t1.isAlive()或t1.join()等待他结束）
+
+  ```java
+  static int x;
+  Thread t1 = new Thread(()->{
+    x = 10;
+  },"t1");
+  t1.start();
+  t1.join();
+  sout(x);
+  ```
+
+- 线程t1打断线程t2(interrupt)前对变量的写，对于其他线程得知t2被打断后对变量的读可见（通过t2.interrupted或t2.isInterrupted）
+
+  ```java
+  static int x;
+  psvm(){
+    Thread t2 = new Thread(()->{
+      while(true){
+        if(Thread.currentThread().isInterrupted()){
+          sout(x);
+          break;
+        }
+      }
+    },"t2");
+    t2.start();
+    
+    new Thread(()->{
+      TimeUnit.SECONDS.sleep(1);
+      x = 10;
+      t2.interrupt();
+    },"t1").start();
+    
+    while(!t2.isInterrupted()){
+      Thread.yield();
+    }
+    sout(x);
+  }
+  ```
+
+- 对变量默认值（0，false，null）的写，对其他线程对该变量的读可见
+
+- 具有传递性，如果x hb -> y 并且 y hb -> z，那么有x hb -> z，配合volatile的防止指令重排，上代码
+
+  ```java
+  volatile static int x;
+  static int y;
+  new Thread(()->{
+    y = 10;
+    x = 20;
+  },"t1").start();
+  
+  new Thread(()->{
+    //x=20 对 t2可见，同时y=10 也对t2可见
+    sout(x);
+  },"t2").start();
+  ```
+
+  变量都是指成员变量或静态成员变量
+
+#### 线程安全问题
+
+单例模式有很多实现方法，饿汉、懒汉、静态内部类、枚举类，试着分析下每种实现下获取单例对象（即调用getInstance）时的线程安全，并思考注释中的问题
+
+- 饿汉式：类加载就会导致该单实例对象被创建
+- 懒汉式：类加载不会导致该单实例对象被创建，而是搜词使用该对象时才会创建
+
+实现1：
+
+```java
+//问题1：为什么加final		答：防止子类覆盖父类方法破坏单例
+//问题2：如果实现了序列化接口，还要怎么做才能防止反序列化破坏单例	
+public final class Singleton implements Serializable{
+  //问题3：为什么设置为私有？是否能防止反射创建新的实例？答：不能防止反射创建对象
+  private Singleton(){}
+  //问题4：这样初始化是否能保证单例对象创建时的线程安全？ 答：可以，静态成员变量都是线程安全的，由JVM加载
+  private static final Singleton INSTANCE = new Singleton();
+  //问题5：为什么提供静态方法而不是直接将INSTANCE设置为public，说出你知道的理由
+  //答：提供更好的封装性，可以实现懒惰的初始化方式，还可以对创建单例对象时有更多的控制权，还可以支持泛型
+  public static Singleton getInstance(){
+    return INSTANCE;
+  }
+  //问题2：答:在反序列化的过程中，如果发现readResolve()方法，就会采用方法内的INSTANCE对象，而不是字节码对	//象，这样即使反序列化了，也是同一个对象
+  public Object readResovle(){
+    return INSTANCE;
+  }
+}
+```
+
+实现2：
+
+```java
+//问题1：枚举单例是如何实现限制实例个数的	答：就是一个继承自Enum的final static的成员变量
+//问题2：枚举单例在创建时是否有并发问题		答：没有，在类加载阶段创建的	
+//问题3：枚举单例能否被反射破坏单例				答：不能
+//问题4：枚举单例能否被反序列化破坏单例		
+//答：枚举类默认实现了Serializable接口的，可以被序列化和反序列化的，但是其考虑到这个问题了，所以内部进行了处理，不能破坏单例
+//问题5：枚举单例属于懒汉式还是饿汉式		答:饿汉式，类加载阶段就创建对象
+//问题6：枚举单例如果希望加入一些单例创建时的初始化逻辑该如何去做	答：可以写一个构造方法
+enum Singleton{
+  INSTACNE;
+}
+```
+
+实现3:
+
+```java
+//懒汉式的一个单例
+public final class Singleton{
+	private Singleton(){}
+  private static Singleton INSTANCE = null;
+  //分析这里的线程安全，并说明有什么缺点 答：可以保证线程安全的 static 方法加synchronized的相当于锁了class类，缺点就是锁的范围有点大，每次调用都要加锁，性能比较低
+  public static synchronized Singleton getInstance(){
+    if(INSTANCE != null){
+      return INSTACNE;
+    }
+    INSTANCE = new Singleton();
+    return INSTANCE;
+  }
+}
+```
+
+实现4：
+
+```java
+public final class Singleton{
+ private Singleton(){}
+  //问题1：为什么要加volatile？ 答：synchronized内部代码还是会重排序的，影响在synchronized外面的(INSTANC != null)的判断，保证判断前，是在调用完构造函数之前的Singleton实例
+  private static voliate Singleton INSATNCE = null;
+  
+  //问题2：对比实现3，说出这样做的意义 答：性能上会比较优越
+  public static Singleton getInstance(){
+    if(INSTANCE != null){
+      return INSTANCE;
+    }
+    synchronized(Singleton.class){
+      //问题3：为什么还要在这里加空判断，之前不是判断过了吗？
+      //答：多线程模式下，防止首次第一次并发访问时候的重复创建问题
+      if(INSTANCE != null){
+        return INSTACNE;
+      }
+      INSTANCE = new Singleton();
+      return INSTANCE;
+    }
+  }
+  
+}
+```
+
+实现5：
+
+```java
+public final class Singleton{
+  private Singleton(){}
+  //问题1：属于懒汉式还是饿汉式 答：懒汉式，内部类加载第一次使用到getInstance()方法才会进行类加载和初始化操作
+  private static class LazyHolder{
+    static final Singleton INSTANCE = new Singleton();
+  }
+  //问题2：在创建时是否有并发问题 答：不会
+  public static Singleton getInstance(){
+    return LazyHodler.INSTANCE;
+  }
+}
+```
+
+### 小结
+
+对于JMM
+
+- 可见性 - 由JVM缓存优化引起
+- 有序性 - 由JVM指令重排序优化引起
+- happens-before规则
+- 原理方面
+  - CPU指令并行
+  - volatile
+- 模式方面
+  - 两阶段终止模式的volatile改进
+  - 同步模式之balking
+
+## 共享模型之无锁
+
+- CAS与volatile
+
+- 原子整数
+
+- 原子引用
+
+- 原子累加器
+
+- Unsafe
+
+  面临的问题，像是银行账户的存取款问题。
+
+### volatile与CAS
+
+获取共享变量时，为了保证该变量的可见性，需要使用volatile修饰。
+
+它可以用来修饰成员变量和静态成员变量，他可以避免线程从自己的工作缓存中查找变量的值，必须到主内存中获取他的值，线程操作volatile变量都是直接操作主内存的。即一个线程对volatile变量的修改，对另一个线程可见。
+
+​	注意
+
+- volatile仅仅保证了共享变量的可见性，让其他线程能够看到最新值，但不能解决指令交错问题（不能保证原子性）
+
+CAS必须接住volatile才能读取到共享变量的最新值来实现Compare and swap的效果		
+
+### CAS效率分析
+
+为什么无锁效率高？
+
+- 无锁的情况下，即使重试失败，线程始终在高速运行，没有停下，而synchronized会让线程在没有获得锁的情况下，会发生上下文的切换，进入阻塞
+- 线程好像高速跑道上的赛车，高速运行时，速度快，一旦发生上下文的切换，就好比赛车要减速，熄火，等待被唤醒又得重新打火、启动、加速...恢复到高速运行的状态，代价比较大
+- 但无锁的情况下，因为线程要保持运行，需要额外CPU的支持，CPU在这里好比高速跑道，没有额外的跑道，线程想高速运行也无从谈起，虽然不会进入阻塞状态，但是由于没有分到时间片，仍然会进入可运行状态，还是会导致上下文的切换，所以最好是线程数少于核心数是最好的。
+
+CAS特点
+
+结合CAS和volatile可以实现无锁并发，适用于线程数少、多核CPU的场景下
+
+- CAS是基于乐观锁的思想：最乐观的估计，不怕别的线程来修改共享变量，就算改了也没关系，我再进行重试吧
+- synchronized是基于悲观锁的思想：最悲观的估计，得防着其他线程来修改共享变量，我上了锁你们都别想改，我改完了解开锁，你们才有机会
+- CAS体现的是无锁并发、无阻塞的并发
+  - 因为没有使用synchronized，所以线程不会陷入阻塞，这时效率提升的因素之一
+  - 但是如果竞争非常激烈，可以想到重试必然发生的非常频繁，反而会影响效率
+
+### 原子整数
+
+JUC并发包提供了：
+
+- AtomicBoolean
+- AtomicInteger
+- AtomicLong
+
+以AtomicInteger为例：
+
+```java
+AtomicInteger i = new AtomicInteger(0);
+//获取并自增(i = 0,结果i = 1,返回0)，类似于i++
+sout(i.getAndIncrement());
+
+//自增并获取(i = 1,结果i = 2,返回2)，类似于++i
+sout(i.incrementAndGet());
+
+//自减并获取(i = 2,结果i = 1,返回1)，类似于--i
+sout(i.decrementAndGet());
+
+//获取并自减(i = 1,结果i = 0,返回1)，类似于i--
+sout(i.getAndDecrement());
+
+//获取并加值(i = 0,结果i = 5,返回0)
+sout(i.getAndAdd(5));
+
+//加值并获取(i = 5,结果i = 0,返回0)
+sout(i.addAndGet(-5));
+```
+
+### 原子引用
+
+- AtomicReference
+- AtomicMarkableReference
+- AtomicStampedReference
+
+为什么需要原子引用类型？
+
+因为我们要保护的类型并不都是Java已经实现的基本类型
+
+#### 不安全实现
+
+#### 安全实现-使用锁
+
+#### 安全实现-使用CAS
+
+#### ABA问题
+
+##### AtomicStampedReference
+
+##### AtomicMarkableReference
+
+### 原子数组
+
+#### 不安全数组
+
+#### 安全的数组
+
+### 字段更新器
+
+### 原子累加器
+
+#### 原子累加器性能比较
+
+#### LongAdder原理分析
+
+#### 伪共享问题
