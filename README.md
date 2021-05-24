@@ -1121,7 +1121,7 @@ sout(i.addAndGet(-5));
 
 ### 原子数组
 
-
+可以参照atomic.TestAtomicArray，实现了非安全数组和安全数组
 
 - AtomicIntegerArray
 - AtomicLongArray
@@ -1219,18 +1219,107 @@ public class AtomicReferenceArrayTest {
 */
 ```
 
-
-
-#### 不安全数组
-
-#### 安全的数组
-
 ### 字段更新器
+
+- AtomicReferenceFieldUpdater 	// 域 字段
+- AtomicIntegerFieldUpdater
+- AtomicLongFieldUpdater
+
+利用字段更新器，可以针对对象的某个域(Field)进行原子操作，只能配合volatile修饰的字段使用，否则会出现异常
+
+```java
+Exception in thread "main" java.lang.IllegalArgumentException: Must be volatile type
+```
+
+代码参照atomic.TestAtomicField
 
 ### 原子累加器
 
+- LongAdder
+- LongAccumulator
+- DoubleAdder
+- DoubleAccumulator
+
+性能对比，代码参照atomic.TestAtomicAdder
+
 #### 原子累加器性能比较
+
+那么LongAdder为什么会比AtomicLong性能高这么多呢?其实提升性能很简单,就是在有竞争时,设置多个累加单元,Thread-0累加Cell[0]，而Thread-1累加Cell[1]...最后将结果汇总。这样他们在累加的时候操作的不同Cell变量，因此减少了CAS重试失败，从而提高性能。
 
 #### LongAdder原理分析
 
+LongAdder是并发大师@Author Doug Lea (J.U.C作者)的作品，设计的非常精巧
+
+LongAdder类有几个关键域
+
+```java
+//累加单元数组，懒惰初始化
+transient volatile Cell[] cells;
+//基础知识，如果没有竞争，则用CAS累加这个域
+transient volatile long base;
+//在cells创建或扩容时，置为1，表示加锁
+transient volatile int cellsBusy;
+```
+
+结合atomic.TestAtomicCas
+
+```java
+//防止缓存行伪共享
+@sun.misc.Contended static final class Cell{
+  volatile long value;
+  Cell(long x){value = x;}
+  //最重要的方法，用来CAS方式进行累加，prev表示旧值，next表示新值
+  final boolean cas(long cmp, long val) {
+    return UNSAFE.compareAndSwapLong(this, valueOffset, cmp, val);
+  }
+}
+```
+
+什么是缓存行和伪共享
+
+缓存与内存的速度比较
+
+| CPU1 Core    |              | CPU2 Core    |              |
+| :----------- | :----------: | :----------- | -----------: |
+| 一级指令缓存 | 一级指令缓存 | 一级指令缓存 | 一级指令缓存 |
+| 二级         |     缓存     | 二级         |         缓存 |
+| 三           |      级      | 缓           |           存 |
+| 内           |              |              |           存 |
+
+速度比较
+
+| 从CPU到          | 大约需要的时钟周期           |
+| ---------------- | ---------------------------- |
+| 寄存器           | 1 cycle(4GHz的CPU约为0.25ns) |
+| L1(一级指令缓存) | 3~4 cycle                    |
+| L2(二级指令缓存) | 10~20 cycle                  |
+| L3(三级指令缓存) | 40~45 cycle                  |
+| 内存             | 120~240 cycle                |
+
+因为CPU与内存的速度差异很大，需要靠预读数据至缓存来提升效率。
+
+而缓存以缓存行为单位，每个缓存行对应着一块内存，一般是64byte(8个long)。
+
+缓存的加入会造成数据副本的产生，即同一份数据会缓存在不同核心的缓存行中
+
+好比，内存中有个商品的价格，CPU1里面需要使用到商品，那么CPU1里面就有了一个商品价格的缓存，同样CPU2需要使用到商品，那么CPU2里面就有了一个商品价格的缓存，那这样的话，两个CPU核心都维护了一个相同商品的价格。
+
+那么CPU1改了这个价格，CPU要保证数据的一致性，如果某个CPU核心更改了数据，其他CPU核心对应的**整个缓存行**必须失效。
+
+因为Cell是数组形式，在内存中是连续存储的，一个Cell为24个字节（16个字节的对象头，Cell里面的value字段为long型的8个字节的value），因此缓存行可以存在2个Cell的对象，这样问题就来了：
+
+- Core-0要修改Cell[0]
+- Core-1要修改Cell[1]
+
+**那么无论谁修改成功，都会导致另一个CPU Core的缓存行失效**，比如Core-0中Cell[0]=6000，Cell[1]=8000，要累加Cell[0]=6001，Cell[1]=8000，这时会让CPU Core-1的缓存行失效
+
+解决的方法就是让Cell处于不同的缓存行
+
+@sun.misc.Contended用来解决这个问题，他的原理是在使用此注解的对象或字段的**前后各增加128字节大小的padding**，从而**让CPU将对象预读至缓存时占用不同的缓存行**，这样不会造成对方的缓存行失效！
+
+最后，什么是防止缓存行伪共享就是这个@sun.misc.Contended的作用
+
+防止多个Cell，在同一个缓存行，导致修改失效
+
 #### 伪共享问题
+
