@@ -6,17 +6,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class TestAccount {
     public static void main(String[] args) {
-        Account1 account = new AccountUnsafe(10000);
-        Account1.demo(account);
+        Account account = new AccountUnsafe(10000);
+        Account.demo(account);
 
 
-        Account1 account1 = new AccountSafe(10000);
-        Account1.demo(account1);
+        Account account1 = new AccountSafe(10000);
+        Account.demo(account1);
     }
 
 }
 
-class AccountUnsafe implements Account1{
+class AccountUnsafe implements Account{
 
     private Integer balance;
 
@@ -39,7 +39,7 @@ class AccountUnsafe implements Account1{
     }
 }
 
-class AccountSafe implements Account1 {
+class AccountSafe implements Account {
     private AtomicInteger balance;
 
     public AccountSafe(Integer balance) {
@@ -67,14 +67,14 @@ class AccountSafe implements Account1 {
 
 
 
-interface Account1 {
+interface Account {
     //获取余额
     Integer getBalance();
 
     //取款
     void withdraw(Integer amount);
 
-    static void demo(Account1 account) {
+    static void demo(Account account) {
         List<Thread> threadList = new ArrayList<>();
         for (int i = 0; i < 1000; i++) {
             threadList.add(new Thread(()->{

@@ -1321,5 +1321,44 @@ transient volatile int cellsBusy;
 
 防止多个Cell，在同一个缓存行，导致修改失效
 
-#### 伪共享问题
+## Unsafe
 
+概述：Unsafe对象提供了非常底层的，操作内存、线程的方法，Unsafe对象不能直接调用，只能通过反射获得
+
+```java
+public class UnsafeAccessor{
+  static Unsafe unsafe;
+  static{
+    try{
+      Field theUnsafe = Unsafe.class.getDeclaredField("theUnsafe");
+    }catch(NoSuchFieldException | IllegalAccessException e){
+      throw new RuntimeException(e);
+    }
+  }
+  static Unsafe getUnsafe(){
+    return unsafe;
+  }
+}
+```
+
+### Unsafe的CAS操作
+
+参照atomic.TestUnsafeAccessor
+
+### Unsafe AtomicInteger
+
+自己使用Unsafe类实现了一个AtomicInteger类，参照atomic.TestMyAtomicInteger
+
+### 小结
+
+- CAS与Volatile
+- API
+  - 原子整数
+  - 原子引用
+  - 原子数组
+  - 字段更新器
+  - 原子累加器
+- Unsafe
+- 原理方面
+  - LongAdder
+  - 伪共享@sun.misc.Contended
