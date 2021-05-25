@@ -1321,7 +1321,7 @@ transient volatile int cellsBusy;
 
 防止多个Cell，在同一个缓存行，导致修改失效
 
-## Unsafe
+### Unsafe
 
 概述：Unsafe对象提供了非常底层的，操作内存、线程的方法，Unsafe对象不能直接调用，只能通过反射获得
 
@@ -1341,11 +1341,11 @@ public class UnsafeAccessor{
 }
 ```
 
-### Unsafe的CAS操作
+#### Unsafe的CAS操作
 
 参照atomic.TestUnsafeAccessor
 
-### Unsafe AtomicInteger
+#### Unsafe AtomicInteger
 
 自己使用Unsafe类实现了一个AtomicInteger类，参照atomic.TestMyAtomicInteger
 
@@ -1362,3 +1362,172 @@ public class UnsafeAccessor{
 - 原理方面
   - LongAdder
   - 伪共享@sun.misc.Contended
+
+## 不可变
+
+- 不可变类的使用
+- 不可变类的设计
+- 无状态类的设计
+
+### 日期转换的问题
+
+下面代码运行时，由于SimpleDateFormat不是线程安全的
+
+```java
+SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+for(int i = 0;i < 10; i++){
+  new Thread(()->{
+    try{
+      sout(sdf.parse("1958-06-08"));
+    } catch(Exception e){
+      sout(e)
+    }
+  }).start();
+}
+```
+
+运行结果参照immutable.TestSdf，改进代码也在其中
+
+### 不可变类的设计
+
+以String类为例
+
+```java
+public final class String implements java.io.Serializable,Compareable<String>,CharSequence{
+  /**The value is used for character storage.*/
+  private final char value[];
+  
+  /**Cache the hash code for the string*/
+  private int hash;//Default to 0
+  //...
+}
+```
+
+final的使用
+
+发现该类、类中所有属性都是final的
+
+- 属性用final修饰保证了该属性是只读的，不能修改
+- 类用final修饰保证了该类中的方法不能被覆盖，防止子类无意间破坏不可变性
+
+构造新字符串对象，会生成新的char[] value，对内容进行复制。这种通过创建副本对象来避免共享的手段称之为[保护性拷贝(defensive copy)]
+
+### 享元模式
+
+定义：英文名称Flyweight patern.当需要重用数量有限的同一类对象时进行一个共享
+
+**体现**
+
+包装类，在JDK中Boolean、Byte、Short、Integer、Character等包装类提供了valueOf方法，例如Long的valueOf会缓存-128~127之间的Long对象，在这个范围内会重用对象，大于这个范围，参会新建Long对象
+
+**注意**
+
+- Byte、Short、Long缓存的范围都是-128~127
+- Character缓存范围是0~127
+- Integer默认范围是-128~127，最小值不能变，但是最大值可以通过调整虚拟机参数-Djava.lang.Integer.IntegerCache.high来调整
+- Boolean缓存了true和false
+
+String串池、BigDecimal和BigInteger都是享元模式，线程安全
+
+**问题**
+
+例如：一个线上商城应用，QPS达到数千，如果每次都重新创建和关闭数据库连接，性能会受到极大影响。这时预先创建好一批连接，放入连接池。一次请求到达后，从连接池中获取连接，使用完毕后再还回连接池，这样既节约了连接的创建和关闭时间，也实现了连接的重用，不至于让庞大的连接数压垮数据库。
+
+参照immutable.TestConnectionPool
+
+自己的实现中没有考虑到的问题：
+
+- 连接的动态增长与收缩
+- 连接保活（可用性监测）
+- 等待超时处理
+- 分布式hash
+
+对于关系型数据库，有比较成熟的连接池实现，例如C3P0，Druid等
+
+对于更通用的对象池，可以考虑使用Apache Commons Pool，例如redis连接池可以考虑Jedis中关于连接池的实现
+
+### final原理
+
+理解了volatile原理，再对比final的实现就比较简单了
+
+```java
+public class TestFinal{
+  final int a = 20;
+}
+```
+
+字节码
+
+```java
+0: aload_0;
+1: invokespecial 	#1;
+4: aload_0;
+5: bipush 	  		20;
+7: putfield 			#2;
+// 写屏障 ↑
+10: return
+```
+
+发现final变量的赋值也会通过putfield指令来完成，同样在这条指令之后也会加入写屏障，保证在其他线程读到他的值时不会出现为0的情况
+
+### 无状态
+
+在web应用中，设计Servlet时为了保证其线程安全，都会有这样的建议，不要为Servlet设置成员变量，这种没有任何成员变量的类是线程安全的
+
+因为成员变量保存的数据可以成为状态信息，因此没有成员边阿玲就称之为[无状态]
+
+### 小结
+
+不可变类的使用
+
+不可变类的设计
+
+还有Final和享元
+
+## 并发编程相关工具
+
+### 自定义线程池
+
+线程数并不是越多越好，多了，容易引发线程争抢，造成上下文的频繁切换，造成性能损耗
+
+### 线程池的构成
+
+- ThreadPool，线程池
+- BlockingQueue，在生产者消费者模式下，平衡生产与消费速率的工具
+
+步骤1：自定义拒绝策略接口
+
+```java
+@FunctionalInterface //拒绝策略
+interface RejectPolicy<T>{
+  void Reject(BlockingQueue<T> queue,T task);
+}
+```
+
+自己实现了ThreadPool，代码见juc.TestThreadPool
+
+### ThreadPoolExecutor
+
+#### 线程池状态
+
+ThreadPoolExecutor使用int的高3位来表示线程池状态，低29位表示线程数量
+
+| 状态名     | 高3位 | 接收新任务 | 处理阻塞队列任务 | 说明                                     |
+| ---------- | ----- | ---------- | ---------------- | ---------------------------------------- |
+| RUNNING    | 111   | Y          | Y                |                                          |
+| SHUTDOWN   | 000   | N          | Y                | 不会接收新任务，但会处理阻塞队列剩余任务 |
+| STOP       | 001   | N          | N                | 会中断正在执行的任务，并抛弃阻塞队列任务 |
+| TIDYING    | 010   | -          | -                | 任务全执行完毕，活动线程为0即将进入终结  |
+| TERMINATED | 011   | -          | -                | 终结状态                                 |
+
+从数字上比较，TERMINATED>TIDYING>STOP>SHUTDOWN>RUNNING
+
+这些信息存储在一个原子变量ctl中，目的是将线程池状态与线程个数合二为一，这样就可以用一次CAS原子操作进行赋值
+
+```java
+//c为旧值，ctlOf返回结果为新值
+ctl.compareAndSet(c,ctlOf(targetState,workerCountOf(c)));
+//rs为高3位代表线程池状态，wc为低29位代表线程个数，ctl是合并他们
+private static int ctlOf(int rs,int wc){return rs|wc;}
+```
+
