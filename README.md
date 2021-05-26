@@ -1531,3 +1531,343 @@ ctl.compareAndSet(c,ctlOf(targetState,workerCountOf(c)));
 private static int ctlOf(int rs,int wc){return rs|wc;}
 ```
 
+#### 构造方法
+
+```java
+public ThreadPoolExecutor(int corePoolSize,
+                          int maximunPoolSize,
+                          long keepAliveTime,
+                          TimeUnit unit,
+                          BlockingQueue<Runnable> workerQueue,
+                          ThreadFactory threadFactory,
+                          RejectedExecutorHandler handler)
+```
+
+- corePoolSize核心线程数目（最多保留的线程数）
+- maximunPoolSize最大线程数目
+- keepAliveTime生存时间-针对救急线程
+- unit时间单位-针对救急线程
+- workQueue阻塞队列
+- threadFactory线程工厂-可以为线程创建时起个好名字，区分线程池线程和其他
+- handler拒绝策略
+
+#### 工作方式
+
+线程池中存在**核心**和**救急**两种线程，核心+救急=最大线程数，假设线程池中设置了两个核心线程，最大线程数为3，那么当五个任务来临，core thread - 1去执行了task1，core thread - 2去执行了task2，剩下的task3，task4放在了阻塞队列等待执行，阻塞队列的size=2，那么线程池会检查有无救急线程，如果可以则创建一个救急线程对task5进行处理，救急线程与核心线程最大的区别就是有生存时间，如果task5执行完毕，那么救急线程就被干掉了，当线程池中核心和救急线程都在忙着呢，阻塞队列也已经满了，那么再来task6、task7等等，就会去执行拒绝策略。
+
+- 线程池中刚开始没有线程，当一个任务提交给线程池后，线程池会创建一个新线程来执行任务
+- 当线程数打到corePoolSize并且没有空闲线程，这时再及嵌入任务，新家的任务就会被加入workQueue队列排队，直到有空闲的线程
+- 如果队列选择了有界队列，那么任务超过了队列大小时，会创建maximunPoolSize - corePoolSize数目的线程来救急
+- 如果线程打到了maximunPoolSize仍然有新任务这时会执行拒绝策略，拒绝策略JDK提供了4中实现，其他著名框架也提供了实现
+  - AbortPolicy让调用者抛出RejectedExecutionException异常，这时默认策略
+  - CallerRunsPolicy让调用者运行任务
+  - DiscardPolicy放弃本次任务
+  - DiscardOldestPolicy放弃队列中最早的任务，本任务取而代之
+  - Dubbo的实现，在抛出RejectedExecutionException异常之前会记录日志，并dump线程栈信息，方便定位问题
+  - Netty实现，是创建一个新县城来执行任务
+  - ActiveMQ的实现，带超时等待（60s）尝试放入队列，类似上面自定义线程池中的拒绝策略
+  - PinPoint的实现，他使用了一个拒绝策略链，会逐一尝试策略链中每种拒绝策略
+- 当高峰过去以后，超过corePoolSize的救急线程如果有一段时间没有任务做，需要结束以节省资源，这个时间由keepAliveTime和unit来控制
+
+JDK中四种拒绝策略，都实现了RejectedExecutionHandler，分别是DiscardPolicy、DiscardOldestPolicy、CallerRunsPolicy和AbortPolicy
+
+根据这个构造方法，JDK Executors类中提供了众多工厂方法来创建各种用途的线程池
+
+#### 工厂方法
+
+##### newFixedThreadPool
+
+```java
+public static ExecutorService new FixedThreadPool(int nThreads){
+  return new ThreadPoolExecutor(nThreads,
+                                nThreads,
+                                0L,
+                                TimeUnit.MILLISECONDS,
+                                new LinkedBlockingQueue<Runnable>())
+}
+```
+
+特点
+
+- 核心线程数 == 最大线程数（没有救急线程被创建），因此也无需超时事件
+
+- 阻塞队列是无界的，可以放任意数量的任务
+
+  **适用于任务量已知，相对耗时的任务**，代码参照juc.TestFixedThreadPool
+
+##### newCachedThreadPool
+
+```java
+public static ExecutorService newCachedThreadPool(){
+  return new ThreadPoolExecutor(0,
+                                Integer.MAX_VALUE,
+                                60L,
+                                TimeUnit.SECONDS,
+                                new SynchronousQueue<Runnable>());
+}
+```
+
+特点
+
+- 核心线程数是0，最大线程数是Integer.MAX_VALUE，救急线程的空闲生存时间是60s，意味着
+
+  - 全部都是救急线程（60s后无任务可以回收）
+  - 救急线程可以无限创建
+
+- 队列采用了SynchronousQueue实现特点是，他没有容量，没有线程来取是放不进去的（一手交钱，一手交货）
+
+  ```java
+  SynchronousQueue<Integer> integers = new SynchronousQueue<>();
+          new Thread(()->{
+              try{
+                  System.out.println("puting..."+1);
+                  integers.put(1);
+                  System.out.println("putted..."+1);
+  
+                  System.out.println("putting..."+2);
+                  integers.put(2);
+                  System.out.println("putted..."+2);
+              }catch(InterruptedException e){
+                  e.printStackTrace();
+              }
+          },"t1").start();
+  
+          try {
+              TimeUnit.SECONDS.sleep(1);
+          } catch (InterruptedException e) {
+              e.printStackTrace();
+          }
+  
+          new Thread(()->{
+              try{
+                  System.out.println("taking...."+1);
+                  integers.take();
+              }catch(InterruptedException e){
+                  e.printStackTrace();
+              }
+          },"t2").start();
+  
+          try {
+              TimeUnit.SECONDS.sleep(1);
+          } catch (InterruptedException e) {
+              e.printStackTrace();
+          }
+  
+          new Thread(()->{
+              try{
+                  System.out.println("taking" + 2);
+                  integers.take();
+              }catch(InterruptedException e){
+                  e.printStackTrace();
+              }
+          },"t3").start();
+  ```
+
+  参考代码juc.TestCahceThreadPool
+
+  整个线程池表现为线程数会根据任务量不断增长，没有上线，当任务执行完毕，空闲1分钟后释放线程。适合任务数比较密集，但每个任务执行时间较短的情况
+
+##### newSingleThreadExecutor
+
+```java
+public static ExecutorService newSingleThreadExecutor(){
+  return new FinalizableDelegatedExecutorService(
+    new ThreadPoolExecutor(1,1,0L,
+                           TimeUnit.MILLISECONDS,new LinkedBlockingQueue<Runnable>()));
+}
+```
+
+使用场景
+
+希望多个任务排队执行。线程数固定为1，任务数多于1时，会放入无界队列排队。任务执行完毕，这唯一的线程也不会被释放。
+
+区别
+
+- 自己创建一个单线程串行执行任务，如果任务执行失败而终止那么没有任何补救措施，而线程池还会新建一个线程，保证池的正常工作
+- Executors.newSingleThreadExecutor()线程个数始终为1，不能修改
+  - FinalizableDelegateExecutorService应用的是装饰器模式，只对外暴露了ExecutorService接口，因此不能调用ThreadPoolExecutor中特有的方法
+- Executors.newFixedThreadPool(1)初始时为1，以后还可以修改
+  - 对外暴露的是ThreadPoolExecutor对象，可以强转后调用setCorePoolSize等方法进行修改
+
+参照juc.TestSingleThreadPool
+
+##### 提交任务
+
+```java
+//执行任务
+void execute(Runnable command);
+
+//提交任务task中所有任务
+<T> List<Future<T>> invokeAll(Collection<? extends Callable<T>> tasks) throws IntegerruptedException;
+
+//提交tasks中所有任务，带超时时间
+<T> List<Future<T>> invokeAll(Collection<? extends Callable<T>> tasks,long timeout,TimeUnit unit) throws InterruptedException;
+
+//提交tasks中所有任务，哪个任务先成功执行完毕，返回此任务执行结果，其他任务取消
+<T> T invokeAny(Collection<? extends Callable<T>> tasks) throws InterruptedException,ExecutionException;
+
+//提交tasks中所有任务，哪个任务先车工执行完毕，返回此任务执行结果，其他任务取消，带超时时间
+<T> T invokeAny(Collection<? extends Callable<T>> tasks,long timeout,TimeUnit unit) throws InterruptedException,ExecutionException,TimeoutException;
+```
+
+##### 关闭线程池
+
+###### shutdown
+
+```java
+/**
+	线程池状态变为SHUTDOWN
+	- 不会接收新的任务
+	- 但已提交的任务会执行完
+	- -此方法不会阻塞调用线程的执行
+*/
+void shutdown();
+```
+
+```java
+public void shutdown(){
+  final ReentrantLock mainLock = this.mainLock;
+  mainlock.lock();
+  try{
+    checkShutdownAccess();
+    //修改线程池状态
+    advanceRunState(SHUTDOWN);
+    //仅会打断空闲线程
+    interruptIdleWorkers();
+    onShutdown();//扩展点 ScheduledThreadPoolExecutor
+  } finally{
+    mainLock.unlock();
+  }
+  //尝试终结（没有运行的线程可以立刻终结，如果还有裕兴的线程也不会等待）
+  tryTerminate();
+}
+```
+
+###### shutdownNow
+
+```java
+/**
+	线程池状态变为STOP
+	- 不会接收新任务
+	- 会将队列中的任务返回
+	- 并用interrupt的方式中断正在执行的任务
+*/
+List<Runnable> shutdownNow();
+```
+
+```java
+public List<Runnable> shutdownNow(){
+  List<Runnable> tasks;
+  final ReentrantLock mainLock = this.mainLock;
+  mainLock.lock();
+  try{
+    checkShutdownAccess();
+    //修改线程池状态
+    advanceRunState(STOP);
+    //打断所有线程
+    interruptWorkers();
+    //获取队列中剩余任务
+    tasks = drainQueue();
+  } finally{
+    mainLock.unlock();
+  }
+  //尝试终结
+  tryTerminate();
+}
+```
+
+###### 其他方法
+
+```java
+//不再RUNNING状态的线程池，此方法就是返回true
+boolean isShutdown();
+
+//线程池状态是否是TERMINATED
+boolean isTerminated();
+
+//调用shutdown后，由于调用线程并不会等待所有任务运行结束，因此如果它想在线程池TERMINATED后做一些事情，可以利用此方法等待
+boolean awaitTermination(long timeout,TimeUnit unit) throws InterruptedException;
+```
+
+### 异步模式之工作线程
+
+让有限的工作线程（Worker Thread）来轮流异步处理无限多的任务。也可以将其归类为分工模式，它的典型实现就是线程池，也体现了经典设计模式中的享元模式。
+
+例如，海底捞的服务员（线程），轮流处理每位客人的点餐（任务），如果为每位客人都配一名转述的服务员，那么成本就太高了（对比另一种多线程设计模式：Thread-Per-Message）
+
+注意，不同任务类型应该使用不同的线程池，这样能够避免饥饿，并能提升效率
+
+例如，如果一个餐馆的工人既要中招呼客人（任务类型A），又要到后厨做菜（任务类型B）显然效率不咋地，分成服务员（线程池A）与厨师（线程池B）更为合理，当然你能想到更细致的分工
+
+#### 饥饿
+
+固定大小线程池会有饥饿先向
+
+- 两个工人是同一个线程池中的两个线程
+- 他们要做的事情是：为客人点餐和到后厨做菜，这时两个阶段的工作
+  - 客人点餐：必须先点完餐，等菜做好，上菜，在此期间处理点餐的工人必须等待
+  - 后厨做菜，没啥好说的，做就是了
+- 比如工人A处理了点餐任务，接下来它要等着工人B把菜做好，然后上菜，他俩也配合的蛮好的
+- 但现在同时来了两个客人，这个时候工人A和工人B都去处理点餐了，这时就没有人做饭了，直接死等
+- 参照代码juc.TestStarvation
+
+### 创建多少线程比较合适
+
+- 过小导致程序不能充分利用系统资源、容易导致饥饿
+- 过大导致更多的线程上下文切换，占用更多内存
+
+#### CPU密集型计算
+
+通常采用CPU核数+1能够实现最优的CPU利用率，+1是保证线程由于页缺失故障（操作系统）或其他原因导致暂停时，额外的这个线程就能顶上去，保证CPU时钟周期不被浪费
+
+#### IO密集型计算
+
+CPU不总是处于繁忙状态，例如，当你执行业务计算式，这时候会使用CPU资源，但当你执行IO操作时、远程RPC调用时，包括进行数据库操作时，这时候CPU就闲下来了，你可以利用多线程提高它的利用率。
+
+经验公式如下
+
+线程数=核数 x 期望CPU利用率 x 总时间(CPU计算时间+等待时间) / CPU计算时间
+
+例如4核CPU计算时间是50%，其他等待时间是50%，期望CPU被100%利用，套用公式
+
+4 x 100%（利用率） x 100%（总时间） / 50% (CPU计算时间) = 8
+
+例如4核CPU计算时间是10%，其他等待时间是90%，期望CPU被100%利用，套用公式
+
+4 x 100%（利用率） x 100%（总时间） / 10% (CPU计算时间) = 40
+
+#### 任务调度线程池
+
+在[任务调度线程池]功能加入之前，可以使用java.util.Timer来实现定时功能，Timer的优点在于简单易用，但由于所有任务都是由同一个线程来调度，因此所有任务都是串行执行的，同一时间只能有一个任务在执行，前一个任务的延迟或者异常都将会影响到之后的任务。
+
+```java
+public static void main(String[] args){
+  Timer timer = new Timer();
+  TimerTask task1 = new TimerTask() {
+    @Override
+    public void run() {
+      System.out.println("task 1");
+    }
+  };
+
+  TimerTask task2 = new TimerTask() {
+    @Override
+    public void run() {
+      System.out.println("task 2");
+    }
+  };
+
+  //使用timer添加两个任务，希望他们都在1s后执行
+  //但是由于timer内只有一个线程来顺序执行队列中的任务，因此[任务1]的延迟，影响了[任务二]的执行
+  timer.schedule(task1, 1000);
+  timer.schedule(task2, 1000);
+}
+```
+
+参照代码juc.TestThreadSchedule
+
+##### 创建一个固定时间执行的线程
+
+比如让线程每周四18:00:00 定时执行任务
+
+参考代码juc.TestThreadFixedSchedule
