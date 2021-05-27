@@ -1871,3 +1871,252 @@ public static void main(String[] args){
 比如让线程每周四18:00:00 定时执行任务
 
 参考代码juc.TestThreadFixedSchedule
+
+### Tomcat线程池
+
+Tomcat在哪里用到了线程池？
+
+#### Connector
+
+======================connector(NIO EndPoint)========================
+
+LimitLatch -----> Acceptor ------> SocketChannel1,2,3... ----有读----> Poller --->  socketProcessor ----> Executor[worker1,worker2....]
+
+
+
+- LimitLatch用来限流，可以控制最大连接个数，类似于J.U.C中的Semaphore
+- Acceptor只负责[接收新的socket连接]
+- Poller只负责监听socket channel是否有[可读I/O事件]
+- 一旦可读，封装一个任务对象（socketProcessor），提交给Executor线程池处理
+- Executor线程池中的工作线程最终负责[处理请求]
+
+Tomcat线程池扩展了ThreadPoolExecutor，行为稍有不同
+
+- 如果总线程数打到maximunPoolSize
+  - 这时不会立刻抛出RejectedExecutionException异常
+  - 而是再次尝试将任务放进队列，如果还是失败，才抛出RejectedExecutionException异常
+
+#### Connector配置
+
+| 配置项              | 默认值 | 说明                                 |
+| ------------------- | ------ | ------------------------------------ |
+| acceptorThreadCount | 1      | acceptor线程数量                     |
+| pollerThreadCount   | 1      | poller线程数量                       |
+| minSpareThreads     | 10     | 核心线程数，即corePoolSize           |
+| maxThreads          | 200    | 最大线程数，即maximumPoolSize        |
+| executor            | -      | Executor名称，用来引用下面的Executor |
+
+#### Executor线程配置
+
+| 配置项                  | 默认值            | 说明                                    |
+| ----------------------- | ----------------- | --------------------------------------- |
+| threadPriority          | 5                 | 线程优先级                              |
+| daemon                  | true              | 是否守护线程                            |
+| minSpareThreads         | 25                | 核心线程数，即corePoolSize              |
+| maxThreads              | 200               | 最大线程数，即maximunPoolSize           |
+| maxIdleTime             | 60000             | 线程生存时间，单位是毫秒，默认值即1分钟 |
+| maxQueueSize            | Integer.MAX_VALUE | 队列长度                                |
+| prestartminSpareThreads | false             | 核心线程是否在服务器启动时启动          |
+
+#### 线程池工作流程
+
+添加新任务 ，那么先判断条件1：提交任务小于核心线程数，条件1成立则加入队列；条件1不成立，则判断条件2：提交任务小于最大线程数，条件2成立则创建救急线程；条件2不成立则加入队列
+
+### Fork/Join	
+
+#### 概念
+
+Fork/Join是JDK1.7加入的新的线程池实现，它体现的是一种分治思想，适用于能够进行任务拆分的CPU密集型运算
+
+所谓的任务拆分，是将一个大型任务拆分为算法上相同的小任务，直至不能拆分可以直接求解。跟递归相关的一些计算，如归并排序、斐波那契数列都可以用分治思想进行求解
+
+Fork/Join在分治的基础上加入了多线程，可以把每个任务的分解和合并交给不同的线程来完成，进一步提升了运算效率
+
+Fork/Join默认会创建与CPU核心数带下相同的线程池
+
+#### 使用
+
+提交给Fork/Join线程池的任务需要继承RecursiveTask（有返回值）或RecursiveAction（没有返回值），例如下面定义了一个对1~n之间的整数求和的任务
+
+代码参照juc.TestForkJoin
+
+**最重要的就是任务分解**
+
+### JUC工具包
+
+#### AQS
+
+全称是AbstractQueuedSynchronizer，是阻塞式锁和相关的同步器工具的框架
+
+特点：
+
+- 用state属性来表示资源的状态（分独占模式和共享模式），子类需要定义如何维护这个状态，控制如何或缺锁和释放锁
+  - getState - 获取state状态
+  - setState - 设置state状态
+  - compareAndSetState - cas机制设置state状态
+  - 独占模式表示只有一个线程能够访问资源，而共享模式可以允许多个线程访问资源
+- 提供了基于FIFO的等待队列，类似于Monitor的EntryList（公平模式）
+- 条件变量来实现等待、唤醒机制，支持多个条件变量，类似于Monitor的WaitSet
+
+子类主要实现这样一些方法（默认抛出UnsupportedOperationException）
+
+- tryAcquire
+- tryRelease
+- tryAcquireShared
+- tryRelesaeShared
+- isHeldExclusively
+
+获取锁的方式
+
+```java
+//如果获取锁失败
+if(!tryAcquire(arg)){
+  //入队，可以选择阻塞当前线程 park & unpark
+}
+```
+
+释放锁的方式
+
+```java
+//如果释放锁成功
+if(tryRelease(arg)){
+  //让阻塞线程恢复运行
+}
+```
+
+参照代码juc.TestAqs，其中MyLock的实现和ReentrantLock相似
+
+#### ReentrantLock
+
+##### 加锁解锁流程
+
+先从构造器开始，默认为非公平模式的实现
+
+````java
+public ReentrantLock(){
+  sync = new NonfairSync();
+}
+````
+
+NonfairSync继承自AQS
+
+###### 没有竞争的情况下
+
+1. state=1
+2. head （Node队列头）
+3. tail （Node队列尾）
+4. exclusiveOwnerThread ---> Thread - 0
+
+```java
+final void lock() {
+  if (compareAndSetState(0, 1))
+    setExclusiveOwnerThread(Thread.currentThread());
+  else
+    acquire(1);
+}
+```
+
+###### 第一个竞争出现的情况下
+
+首先再使用tryAcquire(arg)尝试加锁，但是如果有了竞争了，那么肯定执行失败
+
+```java
+public final void acquire(int arg) {
+  if (!tryAcquire(arg) &&
+      acquireQueued(addWaiter(Node.EXCLUSIVE), arg))
+    selfInterrupt();
+}
+```
+
+Thread - 1执行了
+
+1. CAS尝试将state由0改为1，结果失败
+
+2. 进入tryAcquire逻辑，这时state已经是1，结果仍然失败
+
+3. 接下来进入addWaiter逻辑，构造Node队列
+
+   - Node为waitStatus状态
+
+   - Node的创建是懒惰的
+
+   - 队列中第一个Node成为Dummy（哑元）或哨兵用来占位的，并不关联线程
+
+     head ---> Node(dummy) --->Node(Thread - 1) ---> tail
+
+4. 当前线程就进入了acquireQueued逻辑
+
+   1. acquireQueued会在一个死循环中不断尝试获得锁，失败后进入park阻塞
+   2. 如果自己紧邻着head(排在第二位)，那么会再次使用tryAcquire尝试获取锁，当然这时state仍为1，失败了
+   3. 进入shouldParkAfterFailedAcquire逻辑，将前驱Node，即head的waitStatus改为-1（刚开始Node的Status都为0，Status为-1则表示这个Node有责任唤醒后继节点），这次返回false
+   4. shouldParkAfterFailedAcquire执行完毕回到acquireQueued，再次tryAcquire尝试获取锁，当然这时state为1，还是失败
+   5. 当再次进入shouldParkAfterFailedAcquire时，这时因为其前驱node的waitStatus已经是-1，这次返回true
+   6. 进入parkAndCheckInterrupt，Thread - 1park...
+
+那么再有多个线程经历上述过程，竞争失败那么就变成了
+
+Head ----> Node(Dummy，status=-1) <----> Node(Thread - 1，status=-1) <----> Node(Thread - 2，status=-1)  <-----> Node(Thread - 3，status=0) <----> tail
+
+Thread-0释放锁，进入tryRelease流程，如果成功
+
+- 设置exclusiveOwnerThread为null
+- state = 0
+
+###### 恢复过程
+
+- 当前队列不为null，并且head的waitStatus=-1，进入unparkSuccessor流程
+
+- 找到队列中离head最近的一个Node（没取消的），unpark恢复其运行，本例子中即为Thread -1
+
+- 回到Thread - 1的acquireQueued流程
+
+如果加锁成功（没有竞争），会设置
+
+- exclusiveOwnerThread为Thread-1，state=1
+- head指向刚刚Thread-1所在的Node，该Node清空Thread
+- 原本的head因为从链表断开，而可被垃圾回收
+
+如果这时候有其他线程来竞争（非公平的体现），例如这时候来了个Thread-4
+
+如果不巧又被Thread-4抢先了
+
+- Thread-4被设置为exclusiveOwnerThread，state=1
+- Thread-1再次进入accuireQueued流程，获取锁失败，重新进入park阻塞
+
+#### 读写锁
+
+##### 注意
+
+- 读锁不支持条件变量
+
+- 重入时升级不支持：即持有读锁的情况下去获取写锁，会导致获取写锁永久等待
+
+#### StampedLock
+
+该类自JDK8加入，是为了进一步优化读性能，他的特点是在使用读锁、写锁时都必须配合[戳]使用
+
+加解读锁
+
+```java
+long stamp = lock.readLock();
+lock.unlockRead(stamp);
+```
+
+加解写锁
+
+```java
+long stamp = lock.writeLock();
+lock.unlockWrite(stamp);
+```
+
+乐观读，StampedLock支持tryOptimisticRead()方法（乐观读），读取完毕后需要做一次**戳校验**如果校验通过，表示这期间确实没有写操作，数据可以安全使用，如果校验没通过，需要重新获取读锁，保证数据安全。
+
+```java
+long stamp = lock.tryOptimisticRead();
+//验戳
+if(!lock.validate(stamp)){
+  //锁升级
+}
+```
+
+提供一个数据容器类内部分别使用读锁保护数据的read()方法，写锁保护数据的write()方法
