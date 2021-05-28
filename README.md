@@ -2120,3 +2120,253 @@ if(!lock.validate(stamp)){
 ```
 
 提供一个数据容器类内部分别使用读锁保护数据的read()方法，写锁保护数据的write()方法
+
+StampedLock不支持条件变量
+
+StampedLock不支持可重入
+
+#### Semaphore
+
+信号量，用来限制能同时访问共享资源的线程上限
+
+- 使用Semaphore限流，在访问高峰时期，让请求线程阻塞，高峰期过去再释放许可，当然它只适合限制单机线程数量，并且是限制线程数，而不是限制资源数（例如连接数，请对比Tomcat LimitLatch的实现）
+- 用Semaphore实现简单连接池，对比[享元模式]下的实现（用wait/notify），性能的可读性显然更好，注意下面的实现中线程数和数据库连接数是相等的
+
+```java
+public static void main(String[] args) {
+  // 1. 创建 semaphore 对象
+  Semaphore semaphore = new Semaphore(3);
+  // 2. 10个线程同时运行
+  for (int i = 0; i < 10; i++) {
+    new Thread(() -> {
+        // 3. 获取许可
+        try {
+            semaphore.acquire();
+         } catch (InterruptedException e) {
+            e.printStackTrace();
+         }
+        try {
+          	log.debug("running...");
+          	sleep(1);
+          	log.debug("end...");
+         } finally {
+          	// 4. 释放许可
+          	semaphore.release();
+         }
+     }).start();
+   }
+ }
+```
+
+#### CountdownLatch
+
+用来进行线程同步协作，等待所有线程完成倒计时。
+
+其中构造参数用来初始化等待计数值，await() 用来等待计数归零，countDown() 用来让计数减一
+
+```java
+public static void main(String[] args) throws InterruptedException {
+  CountDownLatch latch = new CountDownLatch(3);
+  new Thread(() -> {
+      log.debug("begin...");
+      sleep(1);
+      latch.countDown();
+      log.debug("end...{}", latch.getCount());
+   }).start();
+  new Thread(() -> {
+      log.debug("begin...");
+      sleep(2);
+      latch.countDown();
+      log.debug("end...{}", latch.getCount());
+   }).start();
+  new Thread(() -> {
+      log.debug("begin...");
+      sleep(1.5);
+      latch.countDown();
+      log.debug("end...{}", latch.getCount());
+   }).start();
+  log.debug("waiting...");
+  latch.await();
+  log.debug("wait end...");
+}
+```
+
+还可以配合线程池来使用的
+
+```java
+public static void main(String[] args) throws InterruptedException {
+  CountDownLatch latch = new CountDownLatch(3);
+  ExecutorService service = Executors.newFixedThreadPool(4);
+  service.submit(() -> {
+      log.debug("begin...");
+      sleep(1);
+      latch.countDown();
+      log.debug("end...{}", latch.getCount());
+   });
+  service.submit(() -> {
+      log.debug("begin...");
+      sleep(1.5);
+      latch.countDown();
+      log.debug("end...{}", latch.getCount());
+   });
+  service.submit(() -> {
+      log.debug("begin...");
+      sleep(2);
+      latch.countDown();
+      log.debug("end...{}", latch.getCount());
+   });
+  service.submit(()->{
+    try {
+      log.debug("waiting...");
+      latch.await();
+      log.debug("wait end...");
+    } catch (InterruptedException e) {
+      e.printStackTrace();
+    }
+  });
+}
+```
+
+CountdownLatch参考juc.TestCountdownLatch
+
+#### CyclicBarrier
+
+循环栅栏，用来进行线程协作，等待线程满足某个计数。构造时设置『计数个数』，每个线程执
+
+行到某个需要“同步”的时刻调用 await() 方法进行等待，当等待的线程数满足『计数个数』时，继续执行
+
+#### 线程安全类
+
+线程安全集合类可以分为三大类：
+
+- 遗留的线程安全集合如 Hashtable ， Vector
+
+- 使用 Collections 装饰的线程安全集合，如：
+  - Collections.synchronizedCollection
+  - Collections.synchronizedList
+  - Collections.synchronizedMap
+  - Collections.synchronizedSet
+  - Collections.synchronizedNavigableMap
+  - Collections.synchronizedNavigableSet
+  - Collections.synchronizedSortedMap
+  - Collections.synchronizedSortedSet
+
+- java.util.concurrent.*
+
+重点介绍 java.util.concurrent.* 下的线程安全集合类，可以发现它们有规律，里面包含三类关键词：
+
+Blocking、CopyOnWrite、Concurrent
+
+- Blocking 大部分实现基于锁，并提供用来阻塞的方法
+
+- CopyOnWrite 之类容器修改开销相对较重
+
+- Concurrent 类型的容器
+  - 内部很多操作使用 cas 优化，一般可以提供较高吞吐量
+
+  - 弱一致性
+
+    - 遍历时弱一致性，例如，当利用迭代器遍历时，如果容器发生修改，迭代器仍然可以继续进行遍
+
+      历，这时内容是旧的
+
+    - 求大小弱一致性，size 操作未必是 100% 准确
+
+    - 读取弱一致性
+
+**JDK7 Hashmap会出现并发死链问题** 在HashMap元素个数超过长度的四分之三时，会触发扩容，初始大小为16
+
+#### BlockingQueue
+
+**BlockingQueue** 原理
+
+#### ConcurrentLinkedQueue
+
+ConcurrentLinkedQueue 的设计与 LinkedBlockingQueue 非常像，也是
+
+- 两把【锁】，同一时刻，可以允许两个线程同时（一个生产者与一个消费者）执行
+
+- dummy 节点的引入让两把【锁】将来锁住的是不同对象，避免竞争
+
+- 只是这【锁】使用了 cas 来实现
+
+事实上，ConcurrentLinkedQueue 应用还是非常广泛的
+
+例如之前讲的 Tomcat 的 Connector 结构时，Acceptor 作为生产者向 Poller 消费者传递事件信息时，正是采用了
+
+ConcurrentLinkedQueue 将 SocketChannel 给 Poller 使用
+
+#### CopyOnWriteArrayList
+
+CopyOnWriteArraySet 是它的马甲 底层实现采用了 写入时拷贝 的思想，增删改操作会将底层数组拷贝一份，更
+
+改操作在新数组上执行，这时不影响其它线程的**并发读**，**读写分离**。 以新增为例：
+
+```java
+public boolean add(E e) {
+  synchronized (lock) {
+      // 获取旧的数组
+      Object[] es = getArray();
+      int len = es.length;
+      // 拷贝新的数组（这里是比较耗时的操作，但不影响其它读线程）
+      es = Arrays.copyOf(es, len + 1);
+      // 添加新元素
+      es[len] = e;
+      // 替换旧的数组
+      setArray(es);
+      return true;
+   }
+}
+```
+
+这里的源码版本是 Java 11，在 Java 1.8 中使用的是可重入锁而不是 synchronized
+
+其它读操作并未加锁，例如：
+
+```java
+public void forEach(Consumer<? super E> action) {
+  Objects.requireNonNull(action);
+  for (Object x : getArray()) {
+      @SuppressWarnings("unchecked") E e = (E) x;
+      action.accept(e);
+   }
+}
+```
+
+适合『读多写少』的应用场景
+
+get 弱一致性
+
+**时间点 操作**
+
+​	1 、Thread-0 getArray()
+
+​	2、 Thread-1 getArray()
+
+​	3 、Thread-1 setArray(arrayCopy)
+
+​	4 、Thread-0 array[index]
+
+迭代器弱一致性
+
+```java
+CopyOnWriteArrayList<Integer> list = new CopyOnWriteArrayList<>();
+list.add(1);
+list.add(2);
+list.add(3);
+Iterator<Integer> iter = list.iterator();
+new Thread(() -> {
+  	list.remove(0);
+  	System.out.println(list);
+}).start();
+sleep1s();
+while (iter.hasNext()) {
+		System.out.println(iter.next());
+}
+```
+
+不要觉得弱一致性就不好
+
+数据库的 MVCC 都是弱一致性的表现
+
+并发高和一致性是矛盾的，需要权衡
